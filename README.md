@@ -160,8 +160,7 @@
          * The only time we want to intercept motion events is if we are in the
          * drag mode.
          */
-        //ViewPage获取事件是mIsBeingDragged==true，外部类获取事件时mIsBeingDragged==false
-        //child获取事件，内部已经处理。
+   
         return mIsBeingDragged;
     }
     
@@ -246,4 +245,141 @@
                     mIsBeingDragged = false;
                 }
 
-主要讲讲该方法，分为另种状态，如果ViewPage处于将要滑动到最终点，则停止滑动，像父控件申请触摸事件，设置滑动状态为正在拖曳，反之咋停止滑动，就是DOWN事件按下时判断是否处理，根据mIsBeingDragged可以判断该事件是否由ViewPage处理还是其child处理，若mIsBeingDragged==true，则后续事件
+主要讲讲该方法，分为另种状态，如果ViewPage处于将要滑动到最终点，则停止滑动，像父控件申请触摸事件，设置滑动状态为正在拖曳，反之咋停止滑动，就是DOWN事件按下时判断是否处理，根据mIsBeingDragged可以判断该事件是否由ViewPage处理还是其child处理，若mIsBeingDragged==true，则后续事件交由ViewPage处理，
+这里可能会感觉很错乱，这就需要对Android的事件分发机制有一定的了解：这里主要分析ViewPage的onInterceptTouchEvent中的事件分发：  
+收件当用户触摸屏幕时，触发onInterceptTouchEvent的DOWN事件，在DOWN事件中会进行两种判断，具体可以参考上面源码的注释，返回mIsBeingDragged==true，则ViewPage自身消耗该事件，反之交由子child，当手指开始滑动时，首先触发onInterceptTouchEvent的MOVE事件（因为DOWN事件只会触发一次），会先判断触摸点当前页面是否可以滑动，以及水平滑动距离，若符合条件，则交由child处理，反之判断水平方向dx，和竖直方向dy，来判断时ViewPgae处理还是外部处理。若都不符合，则交由child处理，onInterceptTouchEvent中省略了该方法。在onInterceptTouchEvent中若mIsBeingDragged==true；则接下来所有事件交由onTouchEvent处理。接下来就看一下onTouchEvent的源码部分：
+    
+    case MotionEvent.ACTION_DOWN: {
+
+                Log.i("mao","--------------------touch_down");
+                mScroller.abortAnimation();
+                mPopulatePending = false;
+                populate();
+
+                // Remember where the motion event started
+                mLastMotionX = mInitialMotionX = ev.getX();
+                mLastMotionY = mInitialMotionY = ev.getY();
+                mActivePointerId = ev.getPointerId(0);
+                break;
+            }
+            
+主要是一些初始化终点，手指的ID的一些参数，
+    
+     case MotionEvent.ACTION_MOVE:
+
+                Log.i("mao","--------------------touch_move");
+
+                //若当前ViewPage没有滑动，则判断是否需要滑动
+                if (!mIsBeingDragged) {
+                    final int pointerIndex = ev.findPointerIndex(mActivePointerId);
+                    //触摸点不可用，则重置触摸条件
+                    if (pointerIndex == -1) {
+                        // A child has consumed some touch events and put us into an inconsistent
+                        // state.
+                        needsInvalidate = resetTouch();
+                        break;
+                    }
+                    final float x = ev.getX(pointerIndex);
+                    final float xDiff = Math.abs(x - mLastMotionX);
+                    final float y = ev.getY(pointerIndex);
+                    final float yDiff = Math.abs(y - mLastMotionY);
+                    if (DEBUG) {
+                        Log.v(TAG, "Moved x to " + x + "," + y + " diff=" + xDiff + "," + yDiff);
+                    }
+                    //若横向距离足够大，且大于纵向距离，则可以滑动
+                    if (xDiff > mTouchSlop && xDiff > yDiff) {
+                        if (DEBUG) Log.v(TAG, "Starting drag!");
+                        //设置为可以滑动
+                        mIsBeingDragged = true;
+                        //请求父类不拦截触摸时事件
+                        requestParentDisallowInterceptTouchEvent(true);
+                        mLastMotionX = x - mInitialMotionX > 0 ? mInitialMotionX + mTouchSlop :
+                                mInitialMotionX - mTouchSlop;
+                        mLastMotionY = y;
+                        setScrollState(SCROLL_STATE_DRAGGING);
+                        setScrollingCacheEnabled(true);
+
+                        // Disallow Parent Intercept, just in case
+                        ViewParent parent = getParent();
+                        if (parent != null) {
+                            parent.requestDisallowInterceptTouchEvent(true);
+                        }
+                    }
+                }
+                // ViewPage水平滑动
+                if (mIsBeingDragged) {
+                    // 获取当前手指的小标
+                    final int activePointerIndex = ev.findPointerIndex(mActivePointerId);
+                    //获取当前手指的x坐标
+                    final float x = ev.getX(activePointerIndex);
+                    //调用该方法，实现页面的滑动效果
+                    needsInvalidate |= performDrag(x);
+                }
+                break;
+                
+在获取MOVE事件后判断ViewPage的滑动条件，实现滑动.
+    
+    case MotionEvent.ACTION_UP:
+
+                Log.i("mao","--------------------touch_up");
+
+                //手指抬起,判断是否可以继续滑动
+                if (mIsBeingDragged) {
+                    final VelocityTracker velocityTracker = mVelocityTracker;
+                    velocityTracker.computeCurrentVelocity(1000, mMaximumVelocity);
+                    int initialVelocity = (int) velocityTracker.getXVelocity(mActivePointerId);
+                    mPopulatePending = true;
+                    //获取实际ViewPage宽度减去左右边距（显示宽度）
+                    final int width = getClientWidth();
+                    //返回View左边界的位置
+                    final int scrollX = getScrollX();
+                    //计算出当前页面信息
+                    final ItemInfo ii = infoForCurrentScrollPosition();
+                    //边缘占比
+                    final float marginOffset = (float) mPageMargin / width;
+                    //当前页面
+                    final int currentPage = ii.position;
+                    //计算当前页面偏移
+                    final float pageOffset = (((float) scrollX / width) - ii.offset)
+                            / (ii.widthFactor + marginOffset);
+                    final int activePointerIndex = ev.findPointerIndex(mActivePointerId);
+                    final float x = ev.getX(activePointerIndex);
+                    //横向偏移
+                    final int totalDelta = (int) (x - mInitialMotionX);
+                    //获取需要切换的页面
+                    int nextPage = determineTargetPage(currentPage, pageOffset, initialVelocity,
+                            totalDelta);
+                    //实现页面切换
+                    setCurrentItemInternal(nextPage, true, true, initialVelocity);
+
+                    needsInvalidate = resetTouch();
+                }
+                break;
+                
+UP 事件，先判断手指抬起后，ViewPage是否继续滑动，若滑动则计算出滑动到的页面，实现页面切换。后面还有一些多只触摸的操作：
+    
+    /**
+             * 多指触摸
+             */
+            case MotionEvent.ACTION_POINTER_DOWN: {
+                final int index = ev.getActionIndex();
+                final float x = ev.getX(index);
+                mLastMotionX = x;
+                mActivePointerId = ev.getPointerId(index);
+                break;
+            }
+            case MotionEvent.ACTION_POINTER_UP:
+                onSecondaryPointerUp(ev);
+                mLastMotionX = ev.getX(ev.findPointerIndex(mActivePointerId));
+                break;
+                
+为了防止多只触摸作的一些处理，最后调用以下代码：
+    
+    if (needsInvalidate) {
+
+
+            ViewCompat.postInvalidateOnAnimation(this);
+        }
+        
+本质上还是调用view.invalidate()方法刷新页面。好了，对于ViewPage的滑动事件先介绍到这里。
+
